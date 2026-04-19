@@ -1,0 +1,16 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# AI Models (The heavy stuff)
+.cache/
+models/
+
+# Environment
+.env
+
+# Frontend
+node_modules/
+dist/
+.vite/
