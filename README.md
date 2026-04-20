@@ -1,51 +1,43 @@
 Arch-Render AI
-Arch-Render AI is a local, full-stack web application designed to assist interior designers and architects in visualizing 3D blockout sketches. By leveraging Stable Diffusion and ControlNet, the application transforms basic 3D geometry into photorealistic architectural renders.
+Arch-Render AI is a full-stack architectural visualization tool that transforms sketches into photorealistic interior renders using artificial intelligence. It is designed for architects and designers who require rapid, high-fidelity visualization.
 Features
-AI-Powered Rendering: Uses Stable Diffusion 1.5 (Realistic Vision V5.1) to generate high-quality architectural visualizations.
-Geometric Conditioning: Utilizes ControlNet (Depth) to ensure the generated output respects the spatial layout and furniture placement of the original sketch.
-Local Execution: Runs entirely on local hardware, ensuring data privacy and zero cloud-compute costs.
-Hardware Optimized: Implements model CPU offloading to run efficiently on consumer-grade GPUs with 8GB VRAM.
-Full-Stack Architecture: Features a FastAPI backend for high-performance image processing and a React/Vite frontend for an intuitive user experience.
+Precision Mode (Canny): Utilizes ControlNet to strictly follow sketch lines, ensuring furniture layout and structural geometry are preserved.
+Creative Mode (Text-to-Image): Generates architectural concepts from scratch using natural language prompts.
+Memory Optimized: Designed for local execution on consumer GPUs (8GB VRAM) using model offloading techniques.
+Modern UI: A responsive interface built with React, Vite, and Tailwind CSS.
 Tech Stack
 Backend: Python, FastAPI, PyTorch, Diffusers, OpenCV.
-Frontend: React, Vite, Axios, Tailwind CSS.
-AI Models: Realistic Vision V5.1, ControlNet (Depth), MiDaS.
+Frontend: React, Vite, Tailwind CSS, Axios.
+AI Engine: Stable Diffusion 1.5 (Realistic Vision V5.1) + ControlNet (Canny).
 Prerequisites
 Python 3.10+
 Node.js 18+
-NVIDIA GPU with CUDA support (RTX 4060 or equivalent recommended)
-CUDA Toolkit 11.8+
+NVIDIA GPU (Recommended: 8GB+ VRAM)
+CUDA Toolkit
 Installation
-Clone the repository:
+1. Clone the repository
 code
 Bash
-git clone https://github.com/s02rayda/arch-render-ai.git
+git clone https://github.com/yourusername/arch-render-ai.git
 cd arch-render-ai
-Setup the Backend:
+2. Setup Backend
 code
 Bash
 cd backend
 python -m venv venv
-.\venv\Scripts\activate
+# Activate venv (Windows)
+venv\Scripts\activate
 pip install -r requirements.txt
-Setup the Frontend:
+python main.py
+3. Setup Frontend
 code
 Bash
 cd ../frontend
 npm install
-npm install axios
-Running the Application
-Start the Backend:
-code
-Bash
-cd backend
-.\venv\Scripts\activate
-uvicorn main:app --reload
-Start the Frontend:
-code
-Bash
-cd ../frontend
 npm run dev
-Access the application at the URL provided by the Vite development server (usually http://localhost:5173).
+Technical Implementation
+Precision Mode: The backend uses OpenCV Canny Edge Detection to extract structural lines from the input sketch. These lines serve as a conditioning signal for the Stable Diffusion U-Net, ensuring the output adheres to the user's design.
+Creative Mode: The backend sets the ControlNet conditioning scale to 0.0, allowing the model to generate images based solely on the provided text prompt.
+Memory Management: The application utilizes pipe.enable_model_cpu_offload() to manage VRAM usage, allowing the pipeline to run on hardware with limited memory by offloading inactive components to system RAM.
 License
-This project is open-source and available for educational and professional use.
+This project is intended for educational and architectural visualization purposes.
