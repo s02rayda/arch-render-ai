@@ -1,7 +1,6 @@
 # ============================================================
-# Arch-Render AI - Phase 3: FastAPI Backend
+# Arch-Render AI - Phase 3: FastAPI Backend (Canny Precision Mode)
 # ============================================================
-from fastapi.responses import Response, JSONResponse # Add Response here
 import os
 os.environ["DIFFUSERS_DISABLE_XFORMERS"] = "1"
 
@@ -31,15 +30,12 @@ from diffusers import (
 app = FastAPI(
     title="Arch-Render AI",
     description="Local AI architectural rendering pipeline",
-    version="1.0.0"
+    version="1.1.0"
 )
 
-# Allow React frontend to talk to this API
-# This is called CORS - Cross Origin Resource Sharing
-# Without this, the browser blocks frontend → backend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite's default port
+    allow_origins=["http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,8 +45,6 @@ app.add_middleware(
 # STEP 2: SETUP PATHS & DEVICE
 # ============================================================
 
-# All generated images will be saved here
-# All generated images will be saved here
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUTS_DIR = BASE_DIR / "outputs"
 OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -61,26 +55,14 @@ print(f"✅ GPU: {torch.cuda.get_device_name(0)}")
 
 # ============================================================
 # STEP 3: LOAD ALL AI MODELS AT STARTUP
-# We load models ONCE when the server starts, not on every
-# request. This is critical — loading takes 30-60 seconds
-# but generating takes only 30-60 seconds per image.
 # ============================================================
 
 print("\n📦 Loading AI models — please wait...")
 
-# --- Load MiDaS ---
-print("Loading MiDaS...")
-midas = torch.hub.load("intel-isl/MiDaS", "DPT_Hybrid")
-midas.to(device)
-midas.eval()
-midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
-transform = midas_transforms.dpt_transform
-print("✅ MiDaS ready!")
-
-# --- Load ControlNet ---
-print("Loading ControlNet...")
+# --- Load ControlNet (CANNY) ---
+print("Loading ControlNet (Canny)...")
 controlnet = ControlNetModel.from_pretrained(
-    "lllyasviel/control_v11f1p_sd15_depth",
+    "lllyasviel/control_v11p_sd15_canny",
     torch_dtype=torch.float16
 )
 print("✅ ControlNet ready!")
@@ -94,9 +76,7 @@ pipe = StableDiffusionControlNetPipeline.from_pretrained(
     safety_checker=None
 )
 
-pipe.scheduler = UniPCMultistepScheduler.from_config(
-    pipe.scheduler.config
-)
+pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config)
 pipe.to(device)
 pipe.enable_model_cpu_offload()
 print("✅ Realistic Vision ready!")
@@ -107,26 +87,13 @@ print("\n🚀 All models loaded! Server is ready.\n")
 # STEP 4: HELPER FUNCTIONS
 # ============================================================
 
-def extract_depth_map(image: Image.Image) -> Image.Image:
-    """Extract depth map from image using MiDaS"""
+def extract_canny_edges(image: Image.Image, low_threshold: int = 100, high_threshold: int = 200) -> Image.Image:
+    """Extract edges from image using OpenCV Canny Edge Detection."""
     img_np = np.array(image.convert("RGB"))
-    input_batch = transform(img_np).to(device)
-    
-    with torch.no_grad():
-        depth_prediction = midas(input_batch)
-        depth_prediction = torch.nn.functional.interpolate(
-            depth_prediction.unsqueeze(1),
-            size=img_np.shape[:2],
-            mode="bicubic",
-            align_corners=False,
-        ).squeeze()
-    
-    depth_np = depth_prediction.cpu().numpy()
-    depth_np = cv2.normalize(
-        depth_np, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U
-    )
-    depth_rgb = cv2.cvtColor(depth_np, cv2.COLOR_GRAY2RGB)
-    return Image.fromarray(depth_rgb)
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, low_threshold, high_threshold)
+    edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+    return Image.fromarray(edges_rgb)
 
 
 def run_pipeline(
@@ -136,31 +103,26 @@ def run_pipeline(
     num_inference_steps: int,
     guidance_scale: float,
     controlnet_scale: float,
+    low_threshold: int,
+    high_threshold: int,
     seed: int
 ) -> tuple:
     """Run the full AI pipeline"""
-    
-    # Resize to SD native resolution
     image_resized = image.resize((512, 512))
-    
-    # Extract depth
-    depth_map = extract_depth_map(image_resized)
-    
-    # Set seed
+    edge_map = extract_canny_edges(image_resized, low_threshold, high_threshold)
     generator = torch.Generator(device=device).manual_seed(seed)
     
-    # Run diffusion
     output = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt,
-        image=depth_map,
+        image=edge_map,
         num_inference_steps=num_inference_steps,
         guidance_scale=guidance_scale,
         controlnet_conditioning_scale=controlnet_scale,
         generator=generator,
     )
     
-    return output.images[0], depth_map
+    return output.images[0], edge_map
 
 # ============================================================
 # STEP 5: API ENDPOINTS
@@ -176,7 +138,6 @@ def root():
         "vram_total": f"{torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB"
     }
 
-
 @app.get("/health")
 def health():
     """Detailed health check"""
@@ -189,93 +150,62 @@ def health():
         "models_loaded": True
     }
 
-
 @app.post("/generate")
 async def generate(
     file: UploadFile = File(...),
     prompt: str = Form(...),
+    negative_prompt: str = Form(default="cartoon, blurry, low quality, deformed, unrealistic"),
     num_inference_steps: int = Form(default=30),
     guidance_scale: float = Form(default=7.5),
     controlnet_scale: float = Form(default=1.0),
+    low_threshold: int = Form(default=100),
+    high_threshold: int = Form(default=200),
     seed: int = Form(default=42)
 ):
-    # Read image
-    contents = await file.read()
-    input_image = Image.open(BytesIO(contents)).convert("RGB")
-    
-    # Run pipeline
-    rendered_image, _ = run_pipeline(
-        input_image, prompt, "cartoon, blurry, low quality", 
-        num_inference_steps, guidance_scale, controlnet_scale, seed
-    )
-    
-    # Return image bytes directly
-    img_byte_arr = BytesIO()
-    rendered_image.save(img_byte_arr, format='PNG')
-    img_byte_arr.seek(0)
-    return Response(content=img_byte_arr.getvalue(), media_type="image/png")
-    """
-    Main generation endpoint.
-    Accepts an image + parameters, returns rendered image.
-    
-    This is what the React frontend will call when the
-    user clicks the Generate button.
-    """
-    
+    """Main generation endpoint."""
     print(f"\n📨 New request received!")
     print(f"   Prompt: {prompt[:50]}...")
-    print(f"   Steps: {num_inference_steps}, Guidance: {guidance_scale}")
     
-    # --- Validate file type ---
     if file.content_type not in ["image/jpeg", "image/png", "image/webp"]:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid file type. Please upload a PNG, JPG, or WebP image."
-        )
+        raise HTTPException(status_code=400, detail="Invalid file type.")
     
     try:
-        # --- Read uploaded image ---
         contents = await file.read()
         input_image = Image.open(BytesIO(contents)).convert("RGB")
-        print(f"   Image size: {input_image.size}")
         
-        # --- Run the AI pipeline ---
         start_time = time.time()
-        print("🎨 Running AI pipeline...")
+        print("🎨 Running AI pipeline (Canny Mode)...")
         
-        rendered_image, depth_map = run_pipeline(
+        rendered_image, edge_map = run_pipeline(
             image=input_image,
             prompt=prompt,
             negative_prompt=negative_prompt,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             controlnet_scale=controlnet_scale,
+            low_threshold=low_threshold,
+            high_threshold=high_threshold,
             seed=seed
         )
         
         elapsed = time.time() - start_time
         print(f"✅ Generation complete in {elapsed:.1f} seconds!")
         
-        # --- Save outputs with unique ID ---
-        # We use UUID so multiple users don't overwrite each other's files
         job_id = str(uuid.uuid4())[:8]
         
         render_path = OUTPUTS_DIR / f"render_{job_id}.png"
-        depth_path = OUTPUTS_DIR / f"depth_{job_id}.png"
+        edge_path = OUTPUTS_DIR / f"edge_{job_id}.png"
         input_path = OUTPUTS_DIR / f"input_{job_id}.png"
         
         rendered_image.save(render_path)
-        depth_map.save(depth_path)
+        edge_map.save(edge_path)
         input_image.save(input_path)
         
-        print(f"💾 Saved outputs with job ID: {job_id}")
-        
-        # --- Return response ---
         return JSONResponse({
             "success": True,
             "job_id": job_id,
             "render_url": f"/outputs/{job_id}/render",
-            "depth_url": f"/outputs/{job_id}/depth",
+            "edge_url": f"/outputs/{job_id}/edge",
             "input_url": f"/outputs/{job_id}/input",
             "generation_time": f"{elapsed:.1f}s",
             "vram_used": f"{torch.cuda.max_memory_allocated(0) / 1024**3:.2f} GB"
@@ -285,7 +215,6 @@ async def generate(
         print(f"❌ Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/outputs/{job_id}/render")
 def get_render(job_id: str):
     """Serve the rendered image"""
@@ -294,15 +223,13 @@ def get_render(job_id: str):
         raise HTTPException(status_code=404, detail="Render not found")
     return FileResponse(path, media_type="image/png")
 
-
-@app.get("/outputs/{job_id}/depth")
-def get_depth(job_id: str):
-    """Serve the depth map"""
-    path = OUTPUTS_DIR / f"depth_{job_id}.png"
+@app.get("/outputs/{job_id}/edge")
+def get_edge(job_id: str):
+    """Serve the edge map"""
+    path = OUTPUTS_DIR / f"edge_{job_id}.png"
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Depth map not found")
+        raise HTTPException(status_code=404, detail="Edge map not found")
     return FileResponse(path, media_type="image/png")
-
 
 @app.get("/outputs/{job_id}/input")
 def get_input(job_id: str):
@@ -312,6 +239,50 @@ def get_input(job_id: str):
         raise HTTPException(status_code=404, detail="Input not found")
     return FileResponse(path, media_type="image/png")
 
+#=============================================================
+@app.post("/generate-text-to-image")
+async def generate_text_to_image(
+    prompt: str = Form(...),
+    negative_prompt: str = Form(default="cartoon, blurry, low quality, deformed, unrealistic"),
+    num_inference_steps: int = Form(default=30),
+    guidance_scale: float = Form(default=7.5),
+    seed: int = Form(default=42)
+):
+    """
+    Creative Mode: Pure Text-to-Image.
+    We pass a dummy image but set the conditioning scale to 0.0.
+    """
+    try:
+        # Create a dummy 512x512 image (required by the pipeline structure)
+        dummy_image = Image.new("RGB", (512, 512), color=(0, 0, 0))
+        
+        generator = torch.Generator(device=device).manual_seed(seed)
+        
+        # 💡 The magic happens here: controlnet_conditioning_scale=0.0
+        # This tells the pipeline to ignore the dummy_image completely.
+        output = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=dummy_image,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            controlnet_conditioning_scale=0.0, 
+            generator=generator,
+        )
+        
+        rendered_image = output.images[0]
+        job_id = str(uuid.uuid4())[:8]
+        render_path = OUTPUTS_DIR / f"render_{job_id}.png"
+        rendered_image.save(render_path)
+        
+        return JSONResponse({
+            "success": True,
+            "job_id": job_id,
+            "render_url": f"/outputs/{job_id}/render"
+        })
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================
 # STEP 6: RUN THE SERVER
@@ -323,5 +294,5 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=False  # Must be False — we can't reload GPU models
+        reload=False
     )

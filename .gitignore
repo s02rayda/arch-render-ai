@@ -14,3 +14,7 @@ models/
 node_modules/
 dist/
 .vite/
+
+#
+backend/outputs/
+backend/inputs-tests
